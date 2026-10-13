@@ -1,0 +1,19 @@
+# SwiftPM and generated application bundles
+/.build/
+/.swiftpm/
+/dist/
+*.dSYM/
+*.xcresult/
+*.profraw
+*.profdata
+
+# Local editor and macOS metadata
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# Local signing material and configuration
+.env
+.env.*
+*.p12
+*.pfx

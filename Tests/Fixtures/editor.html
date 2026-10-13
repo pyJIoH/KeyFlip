@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>KeyFlip editor checks</title>
+<style>
+body { font: 18px system-ui; max-width: 760px; margin: 40px auto; background: #f2f5fa; color: #172134; }
+label { display: block; margin: 24px 0 8px; font-weight: 600; }
+input, textarea, [contenteditable] { display: block; box-sizing: border-box; width: 100%; padding: 14px; border: 1px solid #96a3b5; border-radius: 8px; background: white; color: #172134; font: 22px system-ui; }
+[contenteditable] { min-height: 100px; }
+output { display: block; margin-top: 24px; font-size: 14px; }
+</style>
+<h1>KeyFlip editor checks</h1>
+<p>Disposable local fields. Nothing is submitted or sent over the network.</p>
+<label for="plain">Plain input</label>
+<input id="plain" value="ghbdtn" autocomplete="off" spellcheck="false">
+<label for="multiline">Multiline input</label>
+<textarea id="multiline" rows="3" spellcheck="false">first ghbdtn </textarea>
+<label id="rich-label">Contenteditable composer</label>
+<div id="rich" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="rich-label" spellcheck="false">ghbdtn</div>
+<output id="events">Input events: 0</output>
+<script>
+let count = 0;
+document.addEventListener('input', event => {
+  document.getElementById('events').textContent = `Input events: ${++count}; last field: ${event.target.id}`;
+});
+</script>
+</html>
