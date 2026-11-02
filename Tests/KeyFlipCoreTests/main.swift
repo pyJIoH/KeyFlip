@@ -20,6 +20,7 @@ let words = WordAtCaretTests()
 let transforms = TransformTests()
 let focus = FocusedEditorTests()
 let boundary = BoundaryTests()
+let typedWords = TypedWordTests()
 let cases: [(String, () -> Void)] = [
     ("Web shell does not hide the system-focused editor", focus.testShellDoesNotHideSystemEditor),
     ("Resolve nested focused editor", focus.testDeepestFocusedEditorWins),
@@ -65,7 +66,15 @@ let cases: [(String, () -> Void)] = [
     ("Focus provider priority", boundary.testFocusProviderPriority),
     ("Usable editor with a focus self-cycle", boundary.testUsableFocusSelfCycle),
     ("Complete English and Russian case round trip", boundary.testWholeAlphabetsCaseRoundTrip),
-    ("Multiline and empty transformations", boundary.testMultilineAndEmptyTransforms)
+    ("Multiline and empty transformations", boundary.testMultilineAndEmptyTransforms),
+    ("Typed word and trailing spaces", typedWords.testWordAndTrailingSpaces),
+    ("Typed word Backspace handling", typedWords.testBackspaceRemovesSpacesThenLetters),
+    ("Typed word whitespace boundaries", typedWords.testLeadingSpacesAndOtherWhitespace),
+    ("Typed word trailing space limit", typedWords.testTrailingSpaceLimit),
+    ("Typed word length limit", typedWords.testOverflowWaitsForNextWord),
+    ("Retyped word keeps keys and spaces", typedWords.testReplacementKeepsKeysAndSpaces),
+    ("Typed word matches editor text at a boundary", typedWords.testEditorTextMatching),
+    ("Whole-line copy without a selection", typedWords.testWholeLineCopyDetection)
 ]
 for (name, run) in cases {
     let before = failures

@@ -2,7 +2,7 @@
 
 ## Automated coverage
 
-Run `bash scripts/test.sh` from the repository root. The standalone runner currently contains **45 scenarios** and exits with status 1 if any assertion fails.
+Run `bash scripts/test.sh` from the repository root. The standalone runner currently contains **53 scenarios** and exits with status 1 if any assertion fails.
 
 | Area | Covered cases |
 | --- | --- |
@@ -10,13 +10,14 @@ Run `bash scripts/test.sh` from the repository root. The standalone runner curre
 | Word lookup | English/Russian; punctuation; trailing spaces and their limit; tabs/newlines/CRLF/Unicode whitespace; empty input; UTF-16 emoji/combining sequences; length boundary; clipped context; document offsets and overflow |
 | Transformations | Complete English/Russian alphabets and ё; mixed case; Unicode expansions; symbols/emoji/whitespace; multiline and empty input; alphabet detection; unmapped characters |
 | Focus resolution | Independent providers; nested editors; provider priority; cycles/self-cycles; unreadable candidates; empty candidates; traversal depth limits |
+| Typed word | Trailing spaces and their limit; Backspace; leading/other whitespace; multi-character input; length overflow until the next word; retyped keys; matching editor text at a word boundary, no-break spaces, surrogates; copied-line detection |
 
 Run `bash scripts/build-app.sh` followed by `bash scripts/check-platform.sh` in a logged-in macOS desktop session. These checks cover:
 
-- Command+V down/up events, virtual keycode, generic and device-specific Command flags, loop-prevention tags, and AppKit's modifier interpretation. **No events are posted.**
-- Clipboard staging/restoration, multiple items, binary and Unicode representations, newer-copy protection, empty clipboard, repeated restoration, and automatic restoration on release. A **private, uniquely named pasteboard** is used.
+- Command-V and Command-C down/up events, virtual keycode, generic and device-specific Command flags, Backspace and Unicode typing events without modifiers, loop-prevention tags, and AppKit's modifier interpretation. **No events are posted.**
+- Clipboard staging/restoration, multiple items, binary and Unicode representations, newer-copy protection, empty clipboard, repeated restoration, saving before a copy and staging after it, and automatic restoration on release. A **private, uniquely named pasteboard** is used.
 
-Add `--with-layouts` to check installed U.S./ABC ↔ Russian conversion, both directions, mixed case, multiline text, emoji preservation, and rejection of mixed Latin/Cyrillic input. Enable the layouts in macOS first. This check reads the selected layouts without switching the active input source.
+Add `--with-layouts` to check typed characters with Shift and Caps Lock, installed U.S./ABC ↔ Russian conversion, both directions, mixed case, multiline text, emoji preservation, and rejection of mixed Latin/Cyrillic input. Enable the layouts in macOS first. This check reads the selected layouts without switching the active input source.
 
 GitHub Actions runs the core suite and signed release build. Desktop-dependent checks are explicit local commands because hosted runners do not represent a user's permissions, input sources, or editors.
 
@@ -26,7 +27,7 @@ There is no claim of complete line coverage or universal application compatibili
 
 ## Manual regression checklist
 
-Use disposable text in an empty draft or document. Do not send the draft. Repeat the main conversion cases in a native editor such as TextEdit, a browser input/textarea/contenteditable, and each supported Electron composer, including Codex and Claude Desktop.
+Use disposable text in an empty draft or document. Do not send the draft. Repeat the main conversion cases in a native editor such as TextEdit, a browser input/textarea/contenteditable, each supported Electron composer, including Codex and Claude Desktop, and editors without Accessibility text such as Terminal, iTerm2, and a JetBrains IDE.
 
 The local [editor fixture](../Tests/Fixtures/editor.html) provides three disposable browser fields and an input-event counter. Open it in a browser through Finder. It has no network calls or submit action.
 
@@ -35,10 +36,15 @@ The local [editor fixture](../Tests/Fixtures/editor.html) provides three disposa
 | Type `ghbdtn`, tap either Option alone | `привет`; Russian source active |
 | Tap Option again | `ghbdtn`; English source active |
 | Tap left Control twice | `GHBDTN`, then `ghbdtn` |
-| Select `Ghbdtn` inside a longer sentence, then Option | Only selection becomes `Привет`; replacement stays selected |
+| Select `Ghbdtn` inside a longer sentence, then Option | Only selection becomes `Привет`; caret after it, nothing selected |
 | Select `Hello МИР` and tap left Control | `hELLO мир`; surrounding text unchanged |
 | Put caret after `first ghbdtn `, then Option | `first привет `; trailing space and caret position retained |
-| Convert a word after an emoji; invert selected `straße` | Correct UTF-16 offsets; expanded `STRASSE` remains correctly selected |
+| In Terminal or a JetBrains editor, type `ghbdtn`, tap Option, tap again | `привет`, then `ghbdtn`; source switches each time |
+| Type `ghbdtn`, Backspace twice, type `tn`, tap Option | `привет` |
+| Type `ghbdtn`, click elsewhere and back, tap Option | In an Accessibility editor, `привет`; otherwise only the source switches |
+| In a browser address bar, type a word with inline completion, tap Option | Typed word converted; the completion is removed |
+| Select text in a JetBrains editor, tap Option; tap Option with no selection | Selection converted; with no selection, the line is not duplicated |
+| Convert a word after an emoji; invert selected `straße` | Correct UTF-16 offsets; caret directly after the expanded `STRASSE` |
 | Select multiple lines and convert/invert | Line breaks and surrounding content retained |
 | Press Option+Arrow, Control+A, Command+C/V, right Control, or hold Option > 1 second | No extra conversion on modifier release |
 | Undo after a conversion | Host editor restores its prior text |

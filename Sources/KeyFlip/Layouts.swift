@@ -8,7 +8,17 @@ struct KeyboardLayout: Identifiable {
     let source: TISInputSource
     let language: String
 
+    /// The character a key position produces, for building conversion tables.
     func characters(key: UInt16, shifted: Bool) -> String? {
+        translate(key: key, shifted: shifted, capsLock: false, deadKeys: false)
+    }
+
+    /// The character a key press inserts, or nil for dead keys and control keys.
+    func typedCharacter(key: UInt16, shifted: Bool, capsLock: Bool) -> String? {
+        translate(key: key, shifted: shifted, capsLock: capsLock, deadKeys: true)
+    }
+
+    private func translate(key: UInt16, shifted: Bool, capsLock: Bool, deadKeys: Bool) -> String? {
         guard let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
         let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue()
         guard let bytes = CFDataGetBytePtr(data) else { return nil }
@@ -16,10 +26,13 @@ struct KeyboardLayout: Identifiable {
         var deadKey: UInt32 = 0
         var length = 0
         var output = [UniChar](repeating: 0, count: 16)
-        let result = UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown), shifted ? UInt32(shiftKey >> 8) : 0,
-                                    UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysMask),
+        var modifierState: UInt32 = 0
+        if shifted { modifierState |= UInt32(shiftKey >> 8) }
+        if capsLock { modifierState |= UInt32(alphaLock >> 8) }
+        let result = UCKeyTranslate(layout, key, UInt16(kUCKeyActionDown), modifierState,
+                                    UInt32(LMGetKbdType()), OptionBits(deadKeys ? 0 : kUCKeyTranslateNoDeadKeysMask),
                                     &deadKey, output.count, &length, &output)
-        guard result == noErr, length > 0 else { return nil }
+        guard result == noErr, length > 0, deadKey == 0 else { return nil }
         let text = String(utf16CodeUnits: output, count: length)
         guard text.count == 1, !text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
         return text
@@ -63,6 +76,14 @@ final class Layouts {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
               let pointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
         return Unmanaged<CFString>.fromOpaque(pointer).takeUnretainedValue() as String
+    }
+
+    /// The character a key press inserts with the selected English or Russian input
+    /// source. Other input sources, including input methods, are not tracked.
+    func typedCharacter(key: UInt16, shifted: Bool, capsLock: Bool) -> String? {
+        guard let id = currentID, id == englishID || id == russianID,
+              let layout = available.first(where: { $0.id == id }) else { return nil }
+        return layout.typedCharacter(key: key, shifted: shifted, capsLock: capsLock)
     }
 
     func conversion(for text: String) throws -> (text: String, target: KeyboardLayout) {

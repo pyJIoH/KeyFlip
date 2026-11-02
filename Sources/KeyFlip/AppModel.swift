@@ -26,6 +26,9 @@ final class AppModel: ObservableObject {
     private let monitor = EventMonitor()
     private lazy var replacement = TextReplacement(access: access)
     private var detector = TapDetector()
+    /// The word being typed, in memory only, for editors that hide their text.
+    private var typed = TypedWordBuffer()
+    private var typedPID: pid_t?
     private var lastExternalApplication: NSRunningApplication?
     private var activity: UInt64 = 0
     private var observer: NSObjectProtocol?
@@ -69,6 +72,7 @@ final class AppModel: ObservableObject {
     func invalidateContext() {
         activity &+= 1
         detector.reset()
+        typed.reset()
     }
 
     private func rememberEditor(_ application: NSRunningApplication?) {
@@ -162,7 +166,7 @@ final class AppModel: ObservableObject {
         guard enabled else { return }
         activity &+= 1
         if IsSecureEventInputEnabled() { invalidateContext(); return }
-        if replacement.busy { detector.reset(); return }
+        if replacement.busy { detector.reset(); typed.reset(); return }
         if event.type == .flagsChanged {
             if let action = detector.flagsChanged(key: event.key, modifiers: event.modifiers, time: event.time) {
                 shortcutStatus = action == .layout ? "Option tap detected." : "Left Control tap detected."
@@ -176,10 +180,49 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        switch event.type {
+        case .keyDown: recordTyping(event)
+        case .scrollWheel: break // Scrolling does not move the caret.
+        default: typed.reset() // A click can move the caret or focus.
+        }
         detector.cancel()
     }
 
+    /// Tracks what a key press inserted. Anything that may move the caret, select text,
+    /// or run a command makes the editor's contents unpredictable, so it clears the word.
+    private func recordTyping(_ event: InputEvent) {
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if pid != typedPID {
+            typed.reset()
+            typedPID = pid
+        }
+        guard event.modifiers.isDisjoint(with: [.command, .control, .option]) else { typed.reset(); return }
+        if event.key == UInt16(kVK_Delete) { typed.deleteBackward(); return }
+        guard let text = layouts.typedCharacter(key: event.key, shifted: event.modifiers.contains(.shift),
+                                                capsLock: event.capsLock) else { typed.reset(); return }
+        typed.insert(key: event.key, text: text)
+    }
+
+    private var hasUsableTypedWord: Bool {
+        guard typed.isConvertible, let app = NSWorkspace.shared.frontmostApplication else { return false }
+        return app.processIdentifier == typedPID && !AppCategories.forwardsKeys(app)
+    }
+
+    /// Strategies, in order:
+    /// 1. A word typed just now: Backspace and retype it. Works in any editor that
+    ///    accepts typing; used unless Accessibility shows different text before the caret.
+    /// 2. Accessibility: read the selection or the word before the caret, then paste.
+    /// 3. A selection the editor does not expose: copy, convert, and paste it.
+    /// 4. Otherwise, only switch the input source.
     private func perform(_ action: Action, retriesRemaining: Int = 15) {
+        let typedWord = hasUsableTypedWord
+        if typedWord {
+            switch access.probeCaret(for: typed) {
+            case .matches, .unavailable: retypeTypedWord(action); return
+            case .completionSelected: retypeTypedWord(action, extraDeletions: 1); return
+            case .secure, .contradicts: break
+            }
+        }
         do {
             let target = try access.target()
             let output: String
@@ -200,10 +243,14 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 switch result {
                 case .success:
+                    self.typed.reset()
                     do {
                         if let destination { try self.layouts.select(destination) }
                         self.status = action == .layout ? "Layout converted." : "Letter case inverted."
                     } catch { self.status = error.localizedDescription }
+                case .failure(ReplacementFailure.selectionRejected) where typedWord && self.hasUsableTypedWord:
+                    self.retypeTypedWord(action)
+                    return
                 case let .failure(error):
                     self.status = error.localizedDescription
                     NSSound.beep()
@@ -211,6 +258,7 @@ final class AppModel: ObservableObject {
                 self.onStateChange?()
             }
         } catch TextTargetFailure.noWord {
+            if typedWord { retypeTypedWord(action); return }
             if retryWhileEditorPrepares(action, retriesRemaining: retriesRemaining) { return }
             do {
                 if action == .layout { try layouts.toggle(); status = "Keyboard layout switched." }
@@ -218,19 +266,105 @@ final class AppModel: ObservableObject {
             } catch { status = error.localizedDescription }
             onStateChange?()
         } catch TextTargetFailure.unavailable(let reason) {
+            if typedWord { retypeTypedWord(action); return }
             if retryWhileEditorPrepares(action, retriesRemaining: retriesRemaining) { return }
-            do {
-                if action == .layout {
-                    try layouts.toggle()
-                    status = "Keyboard layout switched; text was not changed (\(reason))."
-                } else { status = "Cannot read this editor's selection (\(reason))."; NSSound.beep() }
-            } catch { status = error.localizedDescription }
-            onStateChange?()
+            replaceCopiedSelection(action, reason: reason)
         } catch {
             status = error.localizedDescription
             NSSound.beep()
             onStateChange?()
         }
+    }
+
+    private func transform(_ text: String, for action: Action) throws -> (text: String, destination: KeyboardLayout?) {
+        switch action {
+        case .invertCase: return (Transforms.invertCase(text), nil)
+        case .layout:
+            let conversion = try layouts.conversion(for: text)
+            return (conversion.text, conversion.target)
+        }
+    }
+
+    private func retypeTypedWord(_ action: Action, extraDeletions: Int = 0) {
+        let word = typed.text
+        let output: String
+        let destination: KeyboardLayout?
+        do { (output, destination) = try transform(word, for: action) } catch {
+            status = error.localizedDescription
+            NSSound.beep()
+            onStateChange?()
+            return
+        }
+        // Switch first, for the few consumers that read key codes instead of characters.
+        var layoutError: Error?
+        if let destination {
+            do { try layouts.select(destination) } catch { layoutError = error }
+        }
+        guard output != word else {
+            status = layoutError?.localizedDescription ?? "No letters needed changing."
+            onStateChange?()
+            return
+        }
+        let version = activity
+        replacement.retype(deleting: typed.characterCount + extraDeletions, with: output + typed.trailingText,
+                           keys: typed.keys(for: output)) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                // Allow tapping again to undo, unless other input arrived meanwhile.
+                if self.activity == version { self.typed.replaceWord(with: output) } else { self.typed.reset() }
+                self.status = layoutError?.localizedDescription
+                    ?? (action == .layout ? "Layout converted." : "Letter case inverted.")
+            case let .failure(error):
+                self.typed.reset()
+                self.status = error.localizedDescription
+                NSSound.beep()
+            }
+            self.onStateChange?()
+        }
+    }
+
+    private func replaceCopiedSelection(_ action: Action, reason: String) {
+        // Accessibility may report an empty selection even when it cannot read the text.
+        guard AppCategories.allowsClipboardFallback(NSWorkspace.shared.frontmostApplication),
+              access.knownSelectionLength() != 0 else {
+            switchLayoutWithoutText(action, reason: reason)
+            return
+        }
+        var destination: KeyboardLayout?
+        replacement.replaceSelectionUsingClipboard(transform: { [unowned self] text in
+            let result = try transform(text, for: action)
+            destination = result.destination
+            return result.text
+        }) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(.nothingCopied):
+                self.switchLayoutWithoutText(action, reason: reason)
+                return
+            case let .success(outcome):
+                self.typed.reset()
+                do {
+                    if let destination { try self.layouts.select(destination) }
+                    self.status = outcome == .unchanged ? "No letters needed changing."
+                        : action == .layout ? "Layout converted." : "Letter case inverted."
+                } catch { self.status = error.localizedDescription }
+            case let .failure(error):
+                self.status = error.localizedDescription
+                NSSound.beep()
+            }
+            self.onStateChange?()
+        }
+    }
+
+    private func switchLayoutWithoutText(_ action: Action, reason: String) {
+        do {
+            if action == .layout {
+                try layouts.toggle()
+                status = "Keyboard layout switched; text was not changed (\(reason))."
+            } else { status = "Cannot read this editor's selection (\(reason))."; NSSound.beep() }
+        } catch { status = error.localizedDescription }
+        onStateChange?()
     }
 
     private func retryWhileEditorPrepares(_ action: Action, retriesRemaining: Int) -> Bool {

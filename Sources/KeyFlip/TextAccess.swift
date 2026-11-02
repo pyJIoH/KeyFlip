@@ -150,10 +150,45 @@ final class TextAccess {
             range = CFRange(location: wordRange.location, length: wordRange.length)
         }
         guard let text = read(range, from: element), !text.isEmpty else {
-            throw AppFailure.message("This editor does not expose the target text. No text was changed.")
+            throw TextTargetFailure.unavailable("\(role): target text unreadable")
         }
         return TextTarget(element: element, processID: pid, originalSelection: selected,
                           range: range, text: text, wasSelected: selected.length > 0)
+    }
+
+    enum CaretProbe {
+        /// No usable editor; Accessibility cannot confirm or contradict the typed word.
+        case unavailable
+        case secure
+        /// The caret follows exactly the typed word and its spaces.
+        case matches
+        /// As `matches`, with an application-made selection after the caret, such as
+        /// inline completion in an address bar. Typing always collapses a user selection.
+        case completionSelected
+        /// The editor's text does not end with the typed word at a word boundary.
+        case contradicts
+    }
+
+    /// Checks the tracked word against the editor, when the editor exposes its text.
+    func probeCaret(for typed: TypedWordBuffer) -> CaretProbe {
+        guard !IsSecureEventInputEnabled() else { return .secure }
+        guard let element = focusedElement() else { return .unavailable }
+        if attribute(kAXSubroleAttribute, of: element) as? String == kAXSecureTextFieldSubrole
+            || attribute("AXProtectedContent", of: element) as? Bool == true { return .secure }
+        guard isEditableAndUnprotected(element), let selected = selection(of: element) else { return .unavailable }
+        let needed = (typed.text + typed.trailingText).utf16.count + 1
+        let start = max(0, selected.location - needed)
+        guard let preceding = read(CFRange(location: start, length: selected.location - start), from: element) else {
+            return .unavailable
+        }
+        guard typed.matches(precedingText: preceding, startsDocument: start == 0) else { return .contradicts }
+        return selected.length == 0 ? .matches : .completionSelected
+    }
+
+    /// The focused editor's selection length, when Accessibility reports one.
+    func knownSelectionLength() -> Int? {
+        guard !IsSecureEventInputEnabled(), let element = focusedElement(), isEditableAndUnprotected(element) else { return nil }
+        return selection(of: element)?.length
     }
 
     func stillFocused(_ target: TextTarget) -> Bool {
@@ -192,8 +227,16 @@ final class ClipboardLease {
     private var saved: [NSPasteboardItem] = []
     private var ownedChangeCount: Int?
     private let pasteboard: NSPasteboard
+    /// The clipboard's change count when it was saved.
+    let savedChangeCount: Int
 
-    init(text: String, pasteboard: NSPasteboard = .general) throws {
+    convenience init(text: String, pasteboard: NSPasteboard = .general) throws {
+        try self.init(pasteboard: pasteboard)
+        try stage(text)
+    }
+
+    /// Saves the clipboard without changing it.
+    init(pasteboard: NSPasteboard = .general) throws {
         self.pasteboard = pasteboard
         let originalChangeCount = pasteboard.changeCount
         for item in pasteboard.pasteboardItems ?? [] {
@@ -207,6 +250,17 @@ final class ClipboardLease {
             saved.append(copy)
         }
         guard pasteboard.changeCount == originalChangeCount else {
+            throw AppFailure.message("The clipboard changed. Try again.")
+        }
+        savedChangeCount = originalChangeCount
+    }
+
+    /// Marks the current clipboard contents as temporary, e.g. after a synthetic copy.
+    func claim() { ownedChangeCount = pasteboard.changeCount }
+
+    /// Puts `text` on the clipboard, unless someone else changed it since it was saved or claimed.
+    func stage(_ text: String) throws {
+        guard pasteboard.changeCount == ownedChangeCount ?? savedChangeCount else {
             throw AppFailure.message("The clipboard changed. Try again.")
         }
         pasteboard.clearContents()
@@ -233,6 +287,7 @@ final class TextReplacement {
     private(set) var busy = false
     private var pasteMethod = ""
     private var activeLease: ClipboardLease?
+    private let typingQueue = DispatchQueue(label: "local.keyflip.typing")
     init(access: TextAccess) { self.access = access }
 
     func shutdown() {
@@ -250,7 +305,7 @@ final class TextReplacement {
         busy = true
         guard target.originalSelection.matches(target.range) || access.select(target.range, in: target.element) else {
             busy = false
-            completion(.failure(AppFailure.message("This editor does not allow selecting the recent word. Select it manually first."))); return
+            completion(.failure(ReplacementFailure.selectionRejected)); return
         }
         waitForSelection(target.range, target: target, version: version) { [self] selected in
             guard selected else {
@@ -319,12 +374,10 @@ final class TextReplacement {
     }
 
     private func postPaste() throws {
-        guard CGPreflightPostEventAccess() else {
-            throw AppFailure.message("macOS is blocking keyboard insertion. Renew KeyFlip's Accessibility access, then quit and reopen KeyFlip.")
-        }
+        guard CGPreflightPostEventAccess() else { throw AppFailure.message(Self.postAccessMessage) }
         // Use normal session routing after the focus checks above. Posting to a
         // PID skips part of the normal keyboard/shortcut dispatch in some apps.
-        try PasteShortcut.events().forEach { $0.post(tap: .cgSessionEventTap) }
+        try KeyEvents.paste().forEach { $0.post(tap: .cgSessionEventTap) }
     }
 
     private func restoreSelectionIfUnchanged(_ target: TextTarget, version: UInt64) {
@@ -353,7 +406,10 @@ final class TextReplacement {
                 return
             }
             if access.read(replacementRange, from: target.element) == text {
-                let finalRange = target.wasSelected ? replacementRange
+                // Leave the caret after the replacement; a converted selection is not reselected.
+                // For the word before the caret, keep the caret after any trailing spaces.
+                let finalRange = target.wasSelected
+                    ? CFRange(location: replacementRange.location + replacementRange.length, length: 0)
                     : CFRange(location: target.originalSelection.location + text.utf16.count - target.range.length, length: 0)
                 // Native paste already puts the caret after the inserted word.
                 // Avoid a redundant AX setter that can disturb web-editor focus.
@@ -377,6 +433,136 @@ final class TextReplacement {
             }
         }
     }
+}
+
+enum ReplacementFailure: LocalizedError {
+    /// The editor refused the Accessibility selection request; nothing was changed.
+    case selectionRejected
+    var errorDescription: String? {
+        "This editor does not allow selecting the recent word. Select it manually first."
+    }
+}
+
+enum ClipboardOutcome { case nothingCopied, unchanged, replaced }
+
+extension TextReplacement {
+    /// Removes `count` characters before the caret with Backspace and types `text`.
+    /// This needs no Accessibility support, so it works in any editor that accepts typing.
+    func retype(deleting count: Int, with text: String, keys: [UInt16],
+                completion: @escaping (Result<Void, Error>) -> Void) {
+        guard !busy else { completion(.failure(AppFailure.message("A replacement is already in progress."))); return }
+        let events: [CGEvent]
+        do {
+            guard CGPreflightPostEventAccess() else { throw AppFailure.message(Self.postAccessMessage) }
+            events = try KeyEvents.backspaces(count) + KeyEvents.typing(text, keys: keys)
+        } catch {
+            completion(.failure(error)); return
+        }
+        busy = true
+        typingQueue.async {
+            // Some applications drop keys posted in a single burst.
+            for (index, event) in events.enumerated() {
+                if index > 0 { usleep(2_000) }
+                event.post(tap: .cgSessionEventTap)
+            }
+            DispatchQueue.main.async { [self] in
+                busy = false
+                completion(.success(()))
+            }
+        }
+    }
+
+    /// For editors that do not expose their selection: copies it with Command-C,
+    /// pastes `transform(selection)` with Command-V, then restores the clipboard.
+    /// Reports `.nothingCopied` when the copy did not produce a usable selection.
+    func replaceSelectionUsingClipboard(transform: @escaping (String) throws -> String,
+                                        completion: @escaping (Result<ClipboardOutcome, Error>) -> Void) {
+        guard !busy else { completion(.failure(AppFailure.message("A replacement is already in progress."))); return }
+        let version = activityVersion()
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let lease: ClipboardLease
+        do {
+            guard CGPreflightPostEventAccess() else { throw AppFailure.message(Self.postAccessMessage) }
+            lease = try ClipboardLease()
+            try KeyEvents.copy().forEach { $0.post(tap: .cgSessionEventTap) }
+        } catch {
+            completion(.failure(error)); return
+        }
+        busy = true
+        activeLease = lease
+        waitForCopy(lease: lease, version: version, pid: pid, attempts: 20, transform: transform, completion: completion)
+    }
+
+    private func waitForCopy(lease: ClipboardLease, version: UInt64, pid: pid_t?, attempts: Int,
+                             transform: @escaping (String) throws -> String,
+                             completion: @escaping (Result<ClipboardOutcome, Error>) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [self] in
+            let pasteboard = NSPasteboard.general
+            let copied = pasteboard.changeCount != lease.savedChangeCount
+            func finish(_ result: Result<ClipboardOutcome, Error>, restoreAfter delay: Double = 0) {
+                let done = { [self] in
+                    lease.restore()
+                    activeLease = nil
+                    busy = false
+                }
+                if delay > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: done) } else { done() }
+                completion(result)
+            }
+            guard activityVersion() == version, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                // Restore only the single change our own copy would make.
+                if pasteboard.changeCount == lease.savedChangeCount + 1 { lease.claim() }
+                else if !copied { restoreLateCopy(lease) }
+                finish(.failure(AppFailure.message("Input changed during replacement. No text was replaced.")))
+                return
+            }
+            guard copied else {
+                if attempts > 1 {
+                    waitForCopy(lease: lease, version: version, pid: pid, attempts: attempts - 1,
+                                transform: transform, completion: completion)
+                } else {
+                    restoreLateCopy(lease)
+                    finish(.success(.nothingCopied))
+                }
+                return
+            }
+            lease.claim()
+            guard let text = pasteboard.string(forType: .string), !text.isEmpty,
+                  !CopiedSelection.isLikelyWholeLineCopy(text) else {
+                finish(.success(.nothingCopied)); return
+            }
+            guard text.utf16.count <= 100_000 else {
+                finish(.failure(AppFailure.message("The selection is too long to convert."))); return
+            }
+            let output: String
+            do { output = try transform(text) } catch { finish(.failure(error)); return }
+            guard output != text else { finish(.success(.unchanged)); return }
+            do {
+                guard activityVersion() == version, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                    throw AppFailure.message("Input changed during replacement. No text was replaced.")
+                }
+                try lease.stage(output)
+                pasteMethod = "Command+V"
+                try KeyEvents.paste().forEach { $0.post(tap: .cgSessionEventTap) }
+            } catch {
+                finish(.failure(error)); return
+            }
+            // The editor cannot confirm the paste; keep the text available while it is handled.
+            finish(.success(.replaced), restoreAfter: 0.8)
+        }
+    }
+
+    /// A copy may land after KeyFlip stopped waiting for it. If exactly one change
+    /// happened since the clipboard was saved, it is that copy: restore the original.
+    private func restoreLateCopy(_ lease: ClipboardLease) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            if NSPasteboard.general.changeCount == lease.savedChangeCount + 1 {
+                lease.claim()
+                lease.restore()
+            }
+        }
+    }
+
+    static let postAccessMessage = "macOS is blocking keyboard insertion. Renew KeyFlip's Accessibility access, then quit and reopen KeyFlip."
 }
 
 private extension CFRange {

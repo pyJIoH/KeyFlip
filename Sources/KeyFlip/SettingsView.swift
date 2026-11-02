@@ -52,7 +52,7 @@ struct SettingsView: View {
                                pane: "com.apple.preference.security?Privacy_Accessibility")
                     permission("Input Monitoring", granted: model.monitoringGranted, request: model.requestMonitoring,
                                pane: "com.apple.preference.security?Privacy_ListenEvent")
-                    Text("Access lets KeyFlip read the active text field and replace your text. If macOS asks you to quit and reopen, do so after enabling access.")
+                    Text("Access lets KeyFlip read the active text field, remember the word you are typing (in memory only), and replace your text. If macOS asks you to quit and reopen, do so after enabling access.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.padding(8)
             }

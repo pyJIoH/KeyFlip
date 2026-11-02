@@ -8,6 +8,7 @@ struct InputEvent {
     let type: CGEventType
     let key: UInt16
     let modifiers: Modifiers
+    let capsLock: Bool
     let time: TimeInterval
 }
 
@@ -39,6 +40,7 @@ final class EventMonitor {
             if event.flags.contains(.maskSecondaryFn) { modifiers.insert(.function) }
             let input = InputEvent(type: type, key: UInt16(event.getIntegerValueField(.keyboardEventKeycode)),
                                    modifiers: modifiers,
+                                   capsLock: event.flags.contains(.maskAlphaShift),
                                    time: Double(event.timestamp) / 1_000_000_000)
             DispatchQueue.main.async { monitor.onEvent?(input) }
             return Unmanaged.passUnretained(event)
