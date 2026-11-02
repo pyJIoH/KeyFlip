@@ -2,7 +2,7 @@
 
 A small, offline macOS menu bar app for correcting text typed with the wrong English/Russian keyboard layout and inverting letter case. Written in Swift, with no third-party dependencies.
 
-[MIT license](LICENSE) · [Contributing](CONTRIBUTING.md) · [Testing guide](docs/TESTING.md)
+[MIT license](LICENSE) · [Contributing](CONTRIBUTING.md) · [Testing guide](docs/TESTING.md) · [Changelog](CHANGELOG.md)
 
 | Tap a key by itself | Action | Example |
 | --- | --- | --- |

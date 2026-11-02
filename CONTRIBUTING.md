@@ -28,6 +28,7 @@ do not replace the manual editor checks in the testing guide.
 ## Pull requests
 
 Explain the problem, the resulting behavior, and how you tested the change.
+Add user-visible changes to the Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 Keep generated bundles, build caches, signing material, and personal data
 out of commits. Contributions intended for inclusion in this project are
 provided under its [MIT license](LICENSE).
